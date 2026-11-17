@@ -95,6 +95,25 @@ function emptyTotals(): StateTotals {
   };
 }
 
+function totalsSum(totals: StateTotals): number {
+  return (
+    totals.closedOnTime +
+    totals.closedDelay +
+    totals.openNotDue +
+    totals.openOverdue +
+    totals.unassigned
+  );
+}
+
+/** Share of a bucket, shown after the count as `(12.5%)`. */
+function formatShare(value: number, total: number): string {
+  if (total <= 0) return '0%';
+  const pct = (value / total) * 100;
+  const rounded = Math.round(pct * 10) / 10;
+  const text = Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+  return `${text}%`;
+}
+
 function rowTotal(row: Pick<AssignedChartBarRow, 'closedOnTime' | 'closedDelay' | 'openNotDue' | 'openOverdue' | 'unassigned'>): number {
   return row.closedOnTime + row.closedDelay + row.openNotDue + row.openOverdue + row.unassigned;
 }
@@ -363,7 +382,12 @@ const StackTooltip: React.FC<StackTooltipProps> = ({
                 />
                 {labels[entry.dataKey] || entry.name}
               </span>
-              <span className="font-medium">{entry.value}</span>
+              <span className="whitespace-nowrap font-medium">
+                {entry.value}{' '}
+                <span className="font-normal text-muted-foreground">
+                  ({formatShare(entry.value, row.total)})
+                </span>
+              </span>
             </div>
           ))}
         <div className="mt-1 flex justify-between border-t border-border pt-1 font-medium">
@@ -383,44 +407,51 @@ interface StateTilesProps {
   onTileClick: (bucket: Exclude<AssignedBucket, 'assigned'>, plant?: string) => void;
 }
 
-const StateTiles: React.FC<StateTilesProps> = ({ totals, labels, plant, onTileClick }) => (
-  <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
-    {STATE_BUCKETS.map((key) => {
-      const Icon = STATE_ICONS[key];
-      return (
-        <Card
-          key={`${plant ?? 'all'}-${key}`}
-          role="button"
-          tabIndex={0}
-          className="cursor-pointer transition-shadow hover:shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          onClick={() => onTileClick(key, plant)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault();
-              onTileClick(key, plant);
-            }
-          }}
-        >
-          <CardContent className="p-4">
-            <div className="flex items-center justify-between gap-2">
-              <div className="min-w-0">
-                <p className="text-sm font-medium leading-snug text-muted-foreground">
-                  {labels[key]}
-                </p>
-                <p className="text-2xl font-bold">{totals[key]}</p>
+const StateTiles: React.FC<StateTilesProps> = ({ totals, labels, plant, onTileClick }) => {
+  const grandTotal = totalsSum(totals);
+
+  return (
+    <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
+      {STATE_BUCKETS.map((key) => {
+        const Icon = STATE_ICONS[key];
+        return (
+          <Card
+            key={`${plant ?? 'all'}-${key}`}
+            role="button"
+            tabIndex={0}
+            className="cursor-pointer transition-shadow hover:shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            onClick={() => onTileClick(key, plant)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                onTileClick(key, plant);
+              }
+            }}
+          >
+            <CardContent className="p-4">
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium leading-snug text-muted-foreground">
+                    {labels[key]}
+                  </p>
+                  <p className="text-2xl font-bold">{totals[key]}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {formatShare(totals[key], grandTotal)}
+                  </p>
+                </div>
+                <Icon
+                  className="h-5 w-5 shrink-0"
+                  style={{ color: COLORS[key] }}
+                  aria-hidden
+                />
               </div>
-              <Icon
-                className="h-5 w-5 shrink-0"
-                style={{ color: COLORS[key] }}
-                aria-hidden
-              />
-            </div>
-          </CardContent>
-        </Card>
-      );
-    })}
-  </div>
-);
+            </CardContent>
+          </Card>
+        );
+      })}
+    </div>
+  );
+};
 
 const StateLegend: React.FC<{ labels: Record<string, string> }> = ({ labels }) => (
   <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
