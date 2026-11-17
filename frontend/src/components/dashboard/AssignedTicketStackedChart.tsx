@@ -6,7 +6,8 @@ import {
   XAxis,
   YAxis,
   CartesianGrid,
-  Tooltip
+  Tooltip,
+  LabelList
 } from 'recharts';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -71,6 +72,7 @@ const STATE_BUCKETS: Array<Exclude<AssignedBucket, 'assigned'>> = [
   'unassigned'
 ];
 
+const TARGET_RATIO = 0.9;
 const ROW_HEIGHT = 44;
 const MAX_BAR_SIZE = 28;
 const X_AXIS_HEIGHT = 30;
@@ -453,6 +455,271 @@ const StateTiles: React.FC<StateTilesProps> = ({ totals, labels, plant, onTileCl
   );
 };
 
+interface DepartmentChartRow {
+  key: string;
+  label: string;
+  deptName: string;
+  closedOnTime: number;
+  closedDelay: number;
+  openNotDue: number;
+  openOverdue: number;
+  unassigned: number;
+  total: number;
+  target: number;
+}
+
+function aggregateByDepartment(
+  rows: AssignedBreakdownRow[],
+  unknownLabel: string
+): DepartmentChartRow[] {
+  const byDept = new Map<string, DepartmentChartRow>();
+
+  for (const row of rows) {
+    const key = row.deptNo != null ? String(row.deptNo) : 'unknown';
+    let entry = byDept.get(key);
+    if (!entry) {
+      const code = row.deptCode?.trim();
+      const name = row.deptName?.trim();
+      const fullName = name || code || unknownLabel;
+      const axisLabel = code || fullName;
+      entry = {
+        key,
+        label: axisLabel.length > 14 ? `${axisLabel.slice(0, 12)}…` : axisLabel,
+        deptName: fullName,
+        closedOnTime: 0,
+        closedDelay: 0,
+        openNotDue: 0,
+        openOverdue: 0,
+        unassigned: 0,
+        total: 0,
+        target: 0
+      };
+      byDept.set(key, entry);
+    }
+    entry.closedOnTime += row.closedOnTime;
+    entry.closedDelay += row.closedDelay;
+    entry.openNotDue += row.openNotDue;
+    entry.openOverdue += row.openOverdue;
+  }
+
+  return Array.from(byDept.values())
+    .map((entry) => {
+      const total =
+        entry.closedOnTime +
+        entry.closedDelay +
+        entry.openNotDue +
+        entry.openOverdue +
+        entry.unassigned;
+      return { ...entry, total, target: total * TARGET_RATIO };
+    })
+    .filter((entry) => entry.total > 0)
+    .sort((a, b) => b.total - a.total || a.label.localeCompare(b.label));
+}
+
+function formatCount(value: number): string {
+  const rounded = Math.round(value * 10) / 10;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+}
+
+interface TargetMarkProps {
+  viewBox?: { x?: number; y?: number; width?: number; height?: number };
+  index?: number;
+  bucket: (typeof STATE_BUCKETS)[number];
+  rows: DepartmentChartRow[];
+}
+
+/** Horizontal mark at 90% of the department stack, drawn once from the top segment. */
+const TargetMark: React.FC<TargetMarkProps> = ({ viewBox, index, bucket, rows }) => {
+  if (!viewBox || index == null) return null;
+  const row = rows[index];
+  if (!row || row.total <= 0) return null;
+
+  const topBucket = [...STATE_BUCKETS].reverse().find((key) => row[key] > 0);
+  if (topBucket !== bucket) return null;
+
+  const { x = 0, y = 0, width = 0, height = 0 } = viewBox;
+  const segmentValue = row[bucket];
+  if (segmentValue <= 0 || height <= 0 || width <= 0) return null;
+
+  const pixelsPerUnit = height / segmentValue;
+  const yTarget = y + pixelsPerUnit * row.total * (1 - TARGET_RATIO);
+  const overhang = 6;
+  const x1 = x - overhang;
+  const x2 = x + width + overhang;
+
+  return (
+    <g>
+      <line
+        x1={x1}
+        x2={x2}
+        y1={yTarget}
+        y2={yTarget}
+        stroke="#ffffff"
+        strokeWidth={4}
+        strokeDasharray="6 4"
+      />
+      <line
+        x1={x1}
+        x2={x2}
+        y1={yTarget}
+        y2={yTarget}
+        stroke="#111827"
+        strokeWidth={1.5}
+        strokeDasharray="6 4"
+      />
+    </g>
+  );
+};
+
+interface DepartmentTooltipProps {
+  active?: boolean;
+  payload?: Array<{
+    name?: string;
+    value?: number | Array<number | string>;
+    color?: string;
+    fill?: string;
+    dataKey?: string | number;
+    payload?: DepartmentChartRow;
+  }>;
+  labels: Record<string, string>;
+  targetLabel: string;
+}
+
+const DepartmentTooltip: React.FC<DepartmentTooltipProps> = ({
+  active,
+  payload,
+  labels,
+  targetLabel
+}) => {
+  if (!active || !payload?.length) return null;
+  const row = payload[0].payload;
+  if (!row) return null;
+
+  return (
+    <div className="rounded-lg border border-border bg-background p-3 shadow-lg">
+      <p className="mb-2 text-sm font-medium">{row.deptName}</p>
+      <div className="space-y-1 text-xs">
+        {STATE_BUCKETS.filter((key) => row[key] > 0).map((key) => (
+          <div key={key} className="flex items-center justify-between gap-4">
+            <span className="flex items-center gap-2">
+              <span
+                className="inline-block h-2.5 w-2.5 rounded-sm"
+                style={{ backgroundColor: COLORS[key] }}
+              />
+              {labels[key]}
+            </span>
+            <span className="whitespace-nowrap font-medium">
+              {row[key]}{' '}
+              <span className="font-normal text-muted-foreground">
+                ({formatShare(row[key], row.total)})
+              </span>
+            </span>
+          </div>
+        ))}
+        <div className="mt-1 flex justify-between border-t border-border pt-1 font-medium">
+          <span>{labels.total}</span>
+          <span>{row.total}</span>
+        </div>
+        <div className="flex justify-between text-muted-foreground">
+          <span>{targetLabel}</span>
+          <span>{formatCount(row.target)}</span>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+interface DepartmentStackedChartProps {
+  rows: AssignedBreakdownRow[];
+  labels: Record<string, string>;
+  unknownLabel: string;
+  title: string;
+  targetLabel: string;
+}
+
+const DepartmentStackedChart: React.FC<DepartmentStackedChartProps> = ({
+  rows,
+  labels,
+  unknownLabel,
+  title,
+  targetLabel
+}) => {
+  const data = useMemo(
+    () => aggregateByDepartment(rows, unknownLabel),
+    [rows, unknownLabel]
+  );
+
+  if (data.length === 0) return null;
+
+  const tiltLabels = data.some((row) => row.label.length > 6);
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold text-foreground">{title}</h3>
+        <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <svg width="28" height="8" aria-hidden className="shrink-0 text-foreground">
+            <line
+              x1="1"
+              y1="4"
+              x2="27"
+              y2="4"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeDasharray="6 4"
+            />
+          </svg>
+          {targetLabel}
+        </span>
+      </div>
+      <ResponsiveContainer width="100%" height={280}>
+        <BarChart
+          data={data}
+          margin={{ top: 12, right: 16, left: 8, bottom: tiltLabels ? 24 : 4 }}
+        >
+          <CartesianGrid strokeDasharray="3 3" vertical={false} />
+          <XAxis
+            dataKey="label"
+            interval={0}
+            fontSize={12}
+            angle={tiltLabels ? -35 : 0}
+            textAnchor={tiltLabels ? 'end' : 'middle'}
+            height={tiltLabels ? 70 : 30}
+          />
+          <YAxis allowDecimals={false} fontSize={12} width={40} />
+          <Tooltip
+            cursor={{ fill: 'hsl(var(--muted))' }}
+            content={<DepartmentTooltip labels={labels} targetLabel={targetLabel} />}
+          />
+          {STATE_BUCKETS.map((bucket) => (
+            <Bar
+              key={bucket}
+              dataKey={bucket}
+              stackId="dept"
+              fill={COLORS[bucket]}
+              name={bucket}
+              isAnimationActive={false}
+              maxBarSize={56}
+            >
+              <LabelList
+                dataKey={bucket}
+                content={(props) => (
+                  <TargetMark
+                    viewBox={(props as TargetMarkProps).viewBox}
+                    index={(props as TargetMarkProps).index}
+                    bucket={bucket}
+                    rows={data}
+                  />
+                )}
+              />
+            </Bar>
+          ))}
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+};
+
 const StateLegend: React.FC<{ labels: Record<string, string> }> = ({ labels }) => (
   <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
     {STATE_BUCKETS.map((bucket) => (
@@ -586,6 +853,16 @@ const AssignedTicketStackedChart: React.FC<AssignedTicketStackedChartProps> = ({
 
   const unassignedLabel = t('dashboard.personalKPIComparison.unassigned');
   const unknownPlantLabel = t('dashboard.personalKPIComparison.unknownPlant');
+  const unknownDepartmentLabel = t('dashboard.personalKPIComparison.unknownDepartment');
+  const departmentChart = (
+    <DepartmentStackedChart
+      rows={rows}
+      labels={labels}
+      unknownLabel={unknownDepartmentLabel}
+      title={t('dashboard.personalKPIComparison.byDepartment')}
+      targetLabel={t('dashboard.personalKPIComparison.target90')}
+    />
+  );
 
   const allBars = useMemo(
     () => aggregateAll(rows, unassigned, unassignedLabel),
@@ -776,6 +1053,7 @@ const AssignedTicketStackedChart: React.FC<AssignedTicketStackedChartProps> = ({
           </div>
         ) : viewMode === 'all' ? (
           <div className="space-y-4">
+            {departmentChart}
             <StateTiles
               totals={allTotals}
               labels={labels}
@@ -791,6 +1069,7 @@ const AssignedTicketStackedChart: React.FC<AssignedTicketStackedChartProps> = ({
           </div>
         ) : (
           <div className="space-y-6">
+            {departmentChart}
             <StateLegend labels={labels} />
             {plantGroups.map((group) => (
               <div key={group.plant} className="space-y-3">
