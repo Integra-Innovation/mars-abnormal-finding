@@ -1292,7 +1292,7 @@ const translations: Record<Language, Record<string, string>> = {
     'dashboard.personalKPIComparison.noDataAvailable': 'No data available',
     'dashboard.personalKPIComparison.export': 'Export',
     'dashboard.personalKPIComparison.department': 'Department',
-    'dashboard.personalKPIComparison.byDepartment': 'By department',
+    'dashboard.personalKPIComparison.byDepartment': 'By Department',
     'dashboard.personalKPIComparison.target90': 'Target (90%)',
     'dashboard.personalKPIComparison.unknownDepartment': 'Unknown',
     'dashboard.personalKPIComparison.selectDepartments': 'Select Departments',

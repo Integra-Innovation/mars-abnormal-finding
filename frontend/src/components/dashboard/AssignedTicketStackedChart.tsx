@@ -268,6 +268,99 @@ function groupByPlant(
   }).filter((group) => group.bars.some((b) => b.total > 0));
 }
 
+interface DepartmentSection {
+  key: string;
+  title: string;
+  bars: AssignedChartBarRow[];
+  totals: StateTotals;
+  assigneeIds: number[];
+}
+
+function groupByDepartment(
+  rows: AssignedBreakdownRow[],
+  unassigned: UnassignedByPlant[],
+  unassignedLabel: string,
+  unknownLabel: string
+): DepartmentSection[] {
+  const groups = new Map<string, { title: string; people: Map<number, AssignedChartBarRow> }>();
+
+  for (const row of rows) {
+    const key = row.deptNo != null ? String(row.deptNo) : 'unknown';
+    let group = groups.get(key);
+    if (!group) {
+      const code = row.deptCode?.trim();
+      const name = row.deptName?.trim();
+      const title = name && code ? `${name} (${code})` : name || code || unknownLabel;
+      group = { title, people: new Map() };
+      groups.set(key, group);
+    }
+    const existing = group.people.get(row.personno);
+    if (existing) {
+      existing.closedOnTime += row.closedOnTime;
+      existing.closedDelay += row.closedDelay;
+      existing.openNotDue += row.openNotDue;
+      existing.openOverdue += row.openOverdue;
+      existing.total = rowTotal(existing);
+    } else {
+      group.people.set(
+        row.personno,
+        buildUserBar(
+          row.personno,
+          row.personName,
+          row.avatarUrl,
+          row.initials,
+          row.bgColor,
+          row.closedOnTime,
+          row.closedDelay,
+          row.openNotDue,
+          row.openOverdue,
+          `-dept-${key}`
+        )
+      );
+    }
+  }
+
+  const sections: DepartmentSection[] = Array.from(groups.entries())
+    .map(([key, group]) => {
+      const bars = Array.from(group.people.values()).sort((a, b) => b.total - a.total);
+      const totals = emptyTotals();
+      for (const bar of bars) {
+        totals.closedOnTime += bar.closedOnTime;
+        totals.closedDelay += bar.closedDelay;
+        totals.openNotDue += bar.openNotDue;
+        totals.openOverdue += bar.openOverdue;
+      }
+      return {
+        key,
+        title: group.title,
+        bars,
+        totals,
+        assigneeIds: bars
+          .map((bar) => bar.personno)
+          .filter((id): id is number => id != null)
+      };
+    })
+    .filter((section) => section.bars.some((bar) => bar.total > 0))
+    .sort((a, b) => totalsSum(b.totals) - totalsSum(a.totals) || a.title.localeCompare(b.title));
+
+  const unassignedTotal = unassigned.reduce((sum, item) => sum + item.count, 0);
+  if (unassignedTotal > 0) {
+    const bar = buildUnassignedBar(unassignedTotal, '-dept');
+    bar.personName = unassignedLabel;
+    const totals = emptyTotals();
+    totals.unassigned = unassignedTotal;
+    sections.push({
+      key: 'unassigned',
+      title: unassignedLabel,
+      bars: [bar],
+      totals,
+      assigneeIds: []
+    });
+  }
+
+  return sections;
+}
+
 interface CustomYTickProps {
   x?: number;
   y?: number;
@@ -455,10 +548,10 @@ const StateTiles: React.FC<StateTilesProps> = ({ totals, labels, plant, onTileCl
   );
 };
 
-interface DepartmentChartRow {
+interface GroupChartRow {
   key: string;
   label: string;
-  deptName: string;
+  fullName: string;
   closedOnTime: number;
   closedDelay: number;
   openNotDue: number;
@@ -471,8 +564,8 @@ interface DepartmentChartRow {
 function aggregateByDepartment(
   rows: AssignedBreakdownRow[],
   unknownLabel: string
-): DepartmentChartRow[] {
-  const byDept = new Map<string, DepartmentChartRow>();
+): GroupChartRow[] {
+  const byDept = new Map<string, GroupChartRow>();
 
   for (const row of rows) {
     const key = row.deptNo != null ? String(row.deptNo) : 'unknown';
@@ -485,7 +578,7 @@ function aggregateByDepartment(
       entry = {
         key,
         label: axisLabel.length > 14 ? `${axisLabel.slice(0, 12)}…` : axisLabel,
-        deptName: fullName,
+        fullName,
         closedOnTime: 0,
         closedDelay: 0,
         openNotDue: 0,
@@ -525,7 +618,7 @@ interface TargetMarkProps {
   viewBox?: { x?: number; y?: number; width?: number; height?: number };
   index?: number;
   bucket: (typeof STATE_BUCKETS)[number];
-  rows: DepartmentChartRow[];
+  rows: GroupChartRow[];
 }
 
 /** Horizontal mark at 90% of the department stack, drawn once from the top segment. */
@@ -579,7 +672,7 @@ interface DepartmentTooltipProps {
     color?: string;
     fill?: string;
     dataKey?: string | number;
-    payload?: DepartmentChartRow;
+    payload?: GroupChartRow;
   }>;
   labels: Record<string, string>;
   targetLabel: string;
@@ -597,7 +690,7 @@ const DepartmentTooltip: React.FC<DepartmentTooltipProps> = ({
 
   return (
     <div className="rounded-lg border border-border bg-background p-3 shadow-lg">
-      <p className="mb-2 text-sm font-medium">{row.deptName}</p>
+      <p className="mb-2 text-sm font-medium">{row.fullName}</p>
       <div className="space-y-1 text-xs">
         {STATE_BUCKETS.filter((key) => row[key] > 0).map((key) => (
           <div key={key} className="flex items-center justify-between gap-4">
@@ -629,26 +722,19 @@ const DepartmentTooltip: React.FC<DepartmentTooltipProps> = ({
   );
 };
 
-interface DepartmentStackedChartProps {
-  rows: AssignedBreakdownRow[];
+interface GroupedTargetChartProps {
+  data: GroupChartRow[];
   labels: Record<string, string>;
-  unknownLabel: string;
   title: string;
   targetLabel: string;
 }
 
-const DepartmentStackedChart: React.FC<DepartmentStackedChartProps> = ({
-  rows,
+const GroupedTargetChart: React.FC<GroupedTargetChartProps> = ({
+  data,
   labels,
-  unknownLabel,
   title,
   targetLabel
 }) => {
-  const data = useMemo(
-    () => aggregateByDepartment(rows, unknownLabel),
-    [rows, unknownLabel]
-  );
-
   if (data.length === 0) return null;
 
   const tiltLabels = data.some((row) => row.label.length > 6);
@@ -836,7 +922,7 @@ const AssignedTicketStackedChart: React.FC<AssignedTicketStackedChartProps> = ({
   totalUserCount = 0
 }) => {
   const { t } = useLanguage();
-  const [viewMode, setViewMode] = useState<'all' | 'byPlant'>('all');
+  const [viewMode, setViewMode] = useState<'all' | 'byPlant' | 'byDepartment'>('all');
 
   const labels = useMemo(
     () => ({
@@ -854,15 +940,7 @@ const AssignedTicketStackedChart: React.FC<AssignedTicketStackedChartProps> = ({
   const unassignedLabel = t('dashboard.personalKPIComparison.unassigned');
   const unknownPlantLabel = t('dashboard.personalKPIComparison.unknownPlant');
   const unknownDepartmentLabel = t('dashboard.personalKPIComparison.unknownDepartment');
-  const departmentChart = (
-    <DepartmentStackedChart
-      rows={rows}
-      labels={labels}
-      unknownLabel={unknownDepartmentLabel}
-      title={t('dashboard.personalKPIComparison.byDepartment')}
-      targetLabel={t('dashboard.personalKPIComparison.target90')}
-    />
-  );
+  const targetLabel = t('dashboard.personalKPIComparison.target90');
 
   const allBars = useMemo(
     () => aggregateAll(rows, unassigned, unassignedLabel),
@@ -884,6 +962,16 @@ const AssignedTicketStackedChart: React.FC<AssignedTicketStackedChartProps> = ({
   const plantGroups = useMemo(
     () => groupByPlant(rows, unassigned, unassignedLabel),
     [rows, unassigned, unassignedLabel]
+  );
+
+  const departmentSections = useMemo(
+    () => groupByDepartment(rows, unassigned, unassignedLabel, unknownDepartmentLabel),
+    [rows, unassigned, unassignedLabel, unknownDepartmentLabel]
+  );
+
+  const departmentChartData = useMemo(
+    () => aggregateByDepartment(rows, unknownDepartmentLabel),
+    [rows, unknownDepartmentLabel]
   );
 
   const plantXMax = useMemo(() => {
@@ -973,6 +1061,53 @@ const AssignedTicketStackedChart: React.FC<AssignedTicketStackedChartProps> = ({
     return name ? `${name} (${plant})` : plant;
   };
 
+  const plantChartData = useMemo(() => {
+    return plantGroups
+      .map((group) => {
+        const total = totalsSum(group.totals);
+        const code = group.plant === 'Unknown' ? unknownPlantLabel : group.plant;
+        const plantName = group.plant === 'Unknown' ? null : plantNames.get(group.plant);
+        return {
+          key: group.plant,
+          label: code.length > 14 ? `${code.slice(0, 12)}…` : code,
+          fullName: plantName ? `${plantName} (${code})` : code,
+          ...group.totals,
+          total,
+          target: total * TARGET_RATIO
+        };
+      })
+      .filter((row) => row.total > 0)
+      .sort((a, b) => b.total - a.total || a.label.localeCompare(b.label));
+  }, [plantGroups, unknownPlantLabel, plantNames]);
+
+  const departmentXMax = useMemo(() => {
+    let max = 0;
+    for (const section of departmentSections) {
+      for (const bar of section.bars) {
+        if (bar.total > max) max = bar.total;
+      }
+    }
+    return max;
+  }, [departmentSections]);
+
+  const openDepartmentBucket = (
+    bucket: Exclude<AssignedBucket, 'assigned'>,
+    assigneeIds: number[]
+  ) => {
+    if (bucket !== 'unassigned' && assigneeIds.length === 0) return;
+    const params = new URLSearchParams();
+    params.set('assignedBucket', bucket);
+    if (bucket === 'unassigned') {
+      params.set('startDate', startDate);
+      params.set('endDate', endDate);
+    } else {
+      params.set('dueStartDate', startDate);
+      params.set('dueEndDate', endDate);
+      params.set('assigned_to', assigneeIds.join(','));
+    }
+    window.open(`/tickets?${params.toString()}`, '_blank', 'noopener,noreferrer');
+  };
+
   const kpiTitle = t('dashboard.personalKPIComparison.ticketCountAssigned');
 
   if (loading) {
@@ -1024,7 +1159,7 @@ const AssignedTicketStackedChart: React.FC<AssignedTicketStackedChartProps> = ({
             <BarChart3 className="h-5 w-5" />
             <span>{kpiTitle}</span>
           </div>
-          <div className="flex space-x-1 rounded-lg bg-muted p-1">
+          <div className="flex flex-wrap gap-1 rounded-lg bg-muted p-1">
             <Button
               type="button"
               variant={viewMode === 'all' ? 'default' : 'ghost'}
@@ -1043,6 +1178,15 @@ const AssignedTicketStackedChart: React.FC<AssignedTicketStackedChartProps> = ({
             >
               {t('dashboard.personalKPIComparison.byPlant')}
             </Button>
+            <Button
+              type="button"
+              variant={viewMode === 'byDepartment' ? 'default' : 'ghost'}
+              size="sm"
+              onClick={() => setViewMode('byDepartment')}
+              className={cn('flex-1 sm:flex-none')}
+            >
+              {t('dashboard.personalKPIComparison.byDepartment')}
+            </Button>
           </div>
         </CardTitle>
       </CardHeader>
@@ -1053,7 +1197,6 @@ const AssignedTicketStackedChart: React.FC<AssignedTicketStackedChartProps> = ({
           </div>
         ) : viewMode === 'all' ? (
           <div className="space-y-4">
-            {departmentChart}
             <StateTiles
               totals={allTotals}
               labels={labels}
@@ -1067,9 +1210,14 @@ const AssignedTicketStackedChart: React.FC<AssignedTicketStackedChartProps> = ({
               onRowClick={handleRowClick}
             />
           </div>
-        ) : (
+        ) : viewMode === 'byPlant' ? (
           <div className="space-y-6">
-            {departmentChart}
+            <GroupedTargetChart
+              data={plantChartData}
+              labels={labels}
+              title={t('dashboard.personalKPIComparison.byPlant')}
+              targetLabel={targetLabel}
+            />
             <StateLegend labels={labels} />
             {plantGroups.map((group) => (
               <div key={group.plant} className="space-y-3">
@@ -1086,6 +1234,33 @@ const AssignedTicketStackedChart: React.FC<AssignedTicketStackedChartProps> = ({
                   bars={group.bars}
                   labels={labels}
                   xMax={plantXMax}
+                  onSegmentClick={handleSegmentClick}
+                  onRowClick={handleRowClick}
+                />
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="space-y-6">
+            <GroupedTargetChart
+              data={departmentChartData}
+              labels={labels}
+              title={t('dashboard.personalKPIComparison.byDepartment')}
+              targetLabel={targetLabel}
+            />
+            <StateLegend labels={labels} />
+            {departmentSections.map((section) => (
+              <div key={section.key} className="space-y-3">
+                <h3 className="text-base font-semibold text-foreground">{section.title}</h3>
+                <StateTiles
+                  totals={section.totals}
+                  labels={labels}
+                  onTileClick={(bucket) => openDepartmentBucket(bucket, section.assigneeIds)}
+                />
+                <SingleStackedChart
+                  bars={section.bars}
+                  labels={labels}
+                  xMax={departmentXMax}
                   onSegmentClick={handleSegmentClick}
                   onRowClick={handleRowClick}
                 />
