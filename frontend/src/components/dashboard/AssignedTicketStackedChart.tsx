@@ -6,7 +6,8 @@ import {
   XAxis,
   YAxis,
   CartesianGrid,
-  Tooltip
+  Tooltip,
+  LabelList
 } from 'recharts';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -71,6 +72,7 @@ const STATE_BUCKETS: Array<Exclude<AssignedBucket, 'assigned'>> = [
   'unassigned'
 ];
 
+const TARGET_RATIO = 0.9;
 const ROW_HEIGHT = 44;
 const MAX_BAR_SIZE = 28;
 const X_AXIS_HEIGHT = 30;
@@ -93,6 +95,25 @@ function emptyTotals(): StateTotals {
     openOverdue: 0,
     unassigned: 0
   };
+}
+
+function totalsSum(totals: StateTotals): number {
+  return (
+    totals.closedOnTime +
+    totals.closedDelay +
+    totals.openNotDue +
+    totals.openOverdue +
+    totals.unassigned
+  );
+}
+
+/** Share of a bucket, shown after the count as `(12.5%)`. */
+function formatShare(value: number, total: number): string {
+  if (total <= 0) return '0%';
+  const pct = (value / total) * 100;
+  const rounded = Math.round(pct * 10) / 10;
+  const text = Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+  return `${text}%`;
 }
 
 function rowTotal(row: Pick<AssignedChartBarRow, 'closedOnTime' | 'closedDelay' | 'openNotDue' | 'openOverdue' | 'unassigned'>): number {
@@ -247,6 +268,99 @@ function groupByPlant(
   }).filter((group) => group.bars.some((b) => b.total > 0));
 }
 
+interface DepartmentSection {
+  key: string;
+  title: string;
+  bars: AssignedChartBarRow[];
+  totals: StateTotals;
+  assigneeIds: number[];
+}
+
+function groupByDepartment(
+  rows: AssignedBreakdownRow[],
+  unassigned: UnassignedByPlant[],
+  unassignedLabel: string,
+  unknownLabel: string
+): DepartmentSection[] {
+  const groups = new Map<string, { title: string; people: Map<number, AssignedChartBarRow> }>();
+
+  for (const row of rows) {
+    const key = row.deptNo != null ? String(row.deptNo) : 'unknown';
+    let group = groups.get(key);
+    if (!group) {
+      const code = row.deptCode?.trim();
+      const name = row.deptName?.trim();
+      const title = name && code ? `${name} (${code})` : name || code || unknownLabel;
+      group = { title, people: new Map() };
+      groups.set(key, group);
+    }
+    const existing = group.people.get(row.personno);
+    if (existing) {
+      existing.closedOnTime += row.closedOnTime;
+      existing.closedDelay += row.closedDelay;
+      existing.openNotDue += row.openNotDue;
+      existing.openOverdue += row.openOverdue;
+      existing.total = rowTotal(existing);
+    } else {
+      group.people.set(
+        row.personno,
+        buildUserBar(
+          row.personno,
+          row.personName,
+          row.avatarUrl,
+          row.initials,
+          row.bgColor,
+          row.closedOnTime,
+          row.closedDelay,
+          row.openNotDue,
+          row.openOverdue,
+          `-dept-${key}`
+        )
+      );
+    }
+  }
+
+  const sections: DepartmentSection[] = Array.from(groups.entries())
+    .map(([key, group]) => {
+      const bars = Array.from(group.people.values()).sort((a, b) => b.total - a.total);
+      const totals = emptyTotals();
+      for (const bar of bars) {
+        totals.closedOnTime += bar.closedOnTime;
+        totals.closedDelay += bar.closedDelay;
+        totals.openNotDue += bar.openNotDue;
+        totals.openOverdue += bar.openOverdue;
+      }
+      return {
+        key,
+        title: group.title,
+        bars,
+        totals,
+        assigneeIds: bars
+          .map((bar) => bar.personno)
+          .filter((id): id is number => id != null)
+      };
+    })
+    .filter((section) => section.bars.some((bar) => bar.total > 0))
+    .sort((a, b) => totalsSum(b.totals) - totalsSum(a.totals) || a.title.localeCompare(b.title));
+
+  const unassignedTotal = unassigned.reduce((sum, item) => sum + item.count, 0);
+  if (unassignedTotal > 0) {
+    const bar = buildUnassignedBar(unassignedTotal, '-dept');
+    bar.personName = unassignedLabel;
+    const totals = emptyTotals();
+    totals.unassigned = unassignedTotal;
+    sections.push({
+      key: 'unassigned',
+      title: unassignedLabel,
+      bars: [bar],
+      totals,
+      assigneeIds: []
+    });
+  }
+
+  return sections;
+}
+
 interface CustomYTickProps {
   x?: number;
   y?: number;
@@ -363,7 +477,12 @@ const StackTooltip: React.FC<StackTooltipProps> = ({
                 />
                 {labels[entry.dataKey] || entry.name}
               </span>
-              <span className="font-medium">{entry.value}</span>
+              <span className="whitespace-nowrap font-medium">
+                {entry.value}{' '}
+                <span className="font-normal text-muted-foreground">
+                  ({formatShare(entry.value, row.total)})
+                </span>
+              </span>
             </div>
           ))}
         <div className="mt-1 flex justify-between border-t border-border pt-1 font-medium">
@@ -383,44 +502,309 @@ interface StateTilesProps {
   onTileClick: (bucket: Exclude<AssignedBucket, 'assigned'>, plant?: string) => void;
 }
 
-const StateTiles: React.FC<StateTilesProps> = ({ totals, labels, plant, onTileClick }) => (
-  <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
-    {STATE_BUCKETS.map((key) => {
-      const Icon = STATE_ICONS[key];
-      return (
-        <Card
-          key={`${plant ?? 'all'}-${key}`}
-          role="button"
-          tabIndex={0}
-          className="cursor-pointer transition-shadow hover:shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          onClick={() => onTileClick(key, plant)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault();
-              onTileClick(key, plant);
-            }
-          }}
-        >
-          <CardContent className="p-4">
-            <div className="flex items-center justify-between gap-2">
-              <div className="min-w-0">
-                <p className="text-sm font-medium leading-snug text-muted-foreground">
-                  {labels[key]}
-                </p>
-                <p className="text-2xl font-bold">{totals[key]}</p>
+const StateTiles: React.FC<StateTilesProps> = ({ totals, labels, plant, onTileClick }) => {
+  const grandTotal = totalsSum(totals);
+
+  return (
+    <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
+      {STATE_BUCKETS.map((key) => {
+        const Icon = STATE_ICONS[key];
+        return (
+          <Card
+            key={`${plant ?? 'all'}-${key}`}
+            role="button"
+            tabIndex={0}
+            className="cursor-pointer transition-shadow hover:shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            onClick={() => onTileClick(key, plant)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                onTileClick(key, plant);
+              }
+            }}
+          >
+            <CardContent className="p-4">
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium leading-snug text-muted-foreground">
+                    {labels[key]}
+                  </p>
+                  <p className="text-2xl font-bold">{totals[key]}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {formatShare(totals[key], grandTotal)}
+                  </p>
+                </div>
+                <Icon
+                  className="h-5 w-5 shrink-0"
+                  style={{ color: COLORS[key] }}
+                  aria-hidden
+                />
               </div>
-              <Icon
-                className="h-5 w-5 shrink-0"
-                style={{ color: COLORS[key] }}
-                aria-hidden
+            </CardContent>
+          </Card>
+        );
+      })}
+    </div>
+  );
+};
+
+interface GroupChartRow {
+  key: string;
+  label: string;
+  fullName: string;
+  closedOnTime: number;
+  closedDelay: number;
+  openNotDue: number;
+  openOverdue: number;
+  unassigned: number;
+  total: number;
+  target: number;
+}
+
+function aggregateByDepartment(
+  rows: AssignedBreakdownRow[],
+  unknownLabel: string
+): GroupChartRow[] {
+  const byDept = new Map<string, GroupChartRow>();
+
+  for (const row of rows) {
+    const key = row.deptNo != null ? String(row.deptNo) : 'unknown';
+    let entry = byDept.get(key);
+    if (!entry) {
+      const code = row.deptCode?.trim();
+      const name = row.deptName?.trim();
+      const fullName = name || code || unknownLabel;
+      const axisLabel = code || fullName;
+      entry = {
+        key,
+        label: axisLabel.length > 14 ? `${axisLabel.slice(0, 12)}…` : axisLabel,
+        fullName,
+        closedOnTime: 0,
+        closedDelay: 0,
+        openNotDue: 0,
+        openOverdue: 0,
+        unassigned: 0,
+        total: 0,
+        target: 0
+      };
+      byDept.set(key, entry);
+    }
+    entry.closedOnTime += row.closedOnTime;
+    entry.closedDelay += row.closedDelay;
+    entry.openNotDue += row.openNotDue;
+    entry.openOverdue += row.openOverdue;
+  }
+
+  return Array.from(byDept.values())
+    .map((entry) => {
+      const total =
+        entry.closedOnTime +
+        entry.closedDelay +
+        entry.openNotDue +
+        entry.openOverdue +
+        entry.unassigned;
+      return { ...entry, total, target: total * TARGET_RATIO };
+    })
+    .filter((entry) => entry.total > 0)
+    .sort((a, b) => b.total - a.total || a.label.localeCompare(b.label));
+}
+
+function formatCount(value: number): string {
+  const rounded = Math.round(value * 10) / 10;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+}
+
+interface TargetMarkProps {
+  viewBox?: { x?: number; y?: number; width?: number; height?: number };
+  index?: number;
+  bucket: (typeof STATE_BUCKETS)[number];
+  rows: GroupChartRow[];
+}
+
+/** Horizontal mark at 90% of the department stack, drawn once from the top segment. */
+const TargetMark: React.FC<TargetMarkProps> = ({ viewBox, index, bucket, rows }) => {
+  if (!viewBox || index == null) return null;
+  const row = rows[index];
+  if (!row || row.total <= 0) return null;
+
+  const topBucket = [...STATE_BUCKETS].reverse().find((key) => row[key] > 0);
+  if (topBucket !== bucket) return null;
+
+  const { x = 0, y = 0, width = 0, height = 0 } = viewBox;
+  const segmentValue = row[bucket];
+  if (segmentValue <= 0 || height <= 0 || width <= 0) return null;
+
+  const pixelsPerUnit = height / segmentValue;
+  const yTarget = y + pixelsPerUnit * row.total * (1 - TARGET_RATIO);
+  const overhang = 6;
+  const x1 = x - overhang;
+  const x2 = x + width + overhang;
+
+  return (
+    <g>
+      <line
+        x1={x1}
+        x2={x2}
+        y1={yTarget}
+        y2={yTarget}
+        stroke="#ffffff"
+        strokeWidth={4}
+        strokeDasharray="6 4"
+      />
+      <line
+        x1={x1}
+        x2={x2}
+        y1={yTarget}
+        y2={yTarget}
+        stroke="#111827"
+        strokeWidth={1.5}
+        strokeDasharray="6 4"
+      />
+    </g>
+  );
+};
+
+interface DepartmentTooltipProps {
+  active?: boolean;
+  payload?: Array<{
+    name?: string;
+    value?: number | Array<number | string>;
+    color?: string;
+    fill?: string;
+    dataKey?: string | number;
+    payload?: GroupChartRow;
+  }>;
+  labels: Record<string, string>;
+  targetLabel: string;
+}
+
+const DepartmentTooltip: React.FC<DepartmentTooltipProps> = ({
+  active,
+  payload,
+  labels,
+  targetLabel
+}) => {
+  if (!active || !payload?.length) return null;
+  const row = payload[0].payload;
+  if (!row) return null;
+
+  return (
+    <div className="rounded-lg border border-border bg-background p-3 shadow-lg">
+      <p className="mb-2 text-sm font-medium">{row.fullName}</p>
+      <div className="space-y-1 text-xs">
+        {STATE_BUCKETS.filter((key) => row[key] > 0).map((key) => (
+          <div key={key} className="flex items-center justify-between gap-4">
+            <span className="flex items-center gap-2">
+              <span
+                className="inline-block h-2.5 w-2.5 rounded-sm"
+                style={{ backgroundColor: COLORS[key] }}
               />
-            </div>
-          </CardContent>
-        </Card>
-      );
-    })}
-  </div>
-);
+              {labels[key]}
+            </span>
+            <span className="whitespace-nowrap font-medium">
+              {row[key]}{' '}
+              <span className="font-normal text-muted-foreground">
+                ({formatShare(row[key], row.total)})
+              </span>
+            </span>
+          </div>
+        ))}
+        <div className="mt-1 flex justify-between border-t border-border pt-1 font-medium">
+          <span>{labels.total}</span>
+          <span>{row.total}</span>
+        </div>
+        <div className="flex justify-between text-muted-foreground">
+          <span>{targetLabel}</span>
+          <span>{formatCount(row.target)}</span>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+interface GroupedTargetChartProps {
+  data: GroupChartRow[];
+  labels: Record<string, string>;
+  title: string;
+  targetLabel: string;
+}
+
+const GroupedTargetChart: React.FC<GroupedTargetChartProps> = ({
+  data,
+  labels,
+  title,
+  targetLabel
+}) => {
+  if (data.length === 0) return null;
+
+  const tiltLabels = data.some((row) => row.label.length > 6);
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold text-foreground">{title}</h3>
+        <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <svg width="28" height="8" aria-hidden className="shrink-0 text-foreground">
+            <line
+              x1="1"
+              y1="4"
+              x2="27"
+              y2="4"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeDasharray="6 4"
+            />
+          </svg>
+          {targetLabel}
+        </span>
+      </div>
+      <ResponsiveContainer width="100%" height={280}>
+        <BarChart
+          data={data}
+          margin={{ top: 12, right: 16, left: 8, bottom: tiltLabels ? 24 : 4 }}
+        >
+          <CartesianGrid strokeDasharray="3 3" vertical={false} />
+          <XAxis
+            dataKey="label"
+            interval={0}
+            fontSize={12}
+            angle={tiltLabels ? -35 : 0}
+            textAnchor={tiltLabels ? 'end' : 'middle'}
+            height={tiltLabels ? 70 : 30}
+          />
+          <YAxis allowDecimals={false} fontSize={12} width={40} />
+          <Tooltip
+            cursor={{ fill: 'hsl(var(--muted))' }}
+            content={<DepartmentTooltip labels={labels} targetLabel={targetLabel} />}
+          />
+          {STATE_BUCKETS.map((bucket) => (
+            <Bar
+              key={bucket}
+              dataKey={bucket}
+              stackId="dept"
+              fill={COLORS[bucket]}
+              name={bucket}
+              isAnimationActive={false}
+              maxBarSize={56}
+            >
+              <LabelList
+                dataKey={bucket}
+                content={(props) => (
+                  <TargetMark
+                    viewBox={(props as TargetMarkProps).viewBox}
+                    index={(props as TargetMarkProps).index}
+                    bucket={bucket}
+                    rows={data}
+                  />
+                )}
+              />
+            </Bar>
+          ))}
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+};
 
 const StateLegend: React.FC<{ labels: Record<string, string> }> = ({ labels }) => (
   <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
@@ -538,7 +922,7 @@ const AssignedTicketStackedChart: React.FC<AssignedTicketStackedChartProps> = ({
   totalUserCount = 0
 }) => {
   const { t } = useLanguage();
-  const [viewMode, setViewMode] = useState<'all' | 'byPlant'>('all');
+  const [viewMode, setViewMode] = useState<'all' | 'byPlant' | 'byDepartment'>('all');
 
   const labels = useMemo(
     () => ({
@@ -555,6 +939,8 @@ const AssignedTicketStackedChart: React.FC<AssignedTicketStackedChartProps> = ({
 
   const unassignedLabel = t('dashboard.personalKPIComparison.unassigned');
   const unknownPlantLabel = t('dashboard.personalKPIComparison.unknownPlant');
+  const unknownDepartmentLabel = t('dashboard.personalKPIComparison.unknownDepartment');
+  const targetLabel = t('dashboard.personalKPIComparison.target90');
 
   const allBars = useMemo(
     () => aggregateAll(rows, unassigned, unassignedLabel),
@@ -576,6 +962,16 @@ const AssignedTicketStackedChart: React.FC<AssignedTicketStackedChartProps> = ({
   const plantGroups = useMemo(
     () => groupByPlant(rows, unassigned, unassignedLabel),
     [rows, unassigned, unassignedLabel]
+  );
+
+  const departmentSections = useMemo(
+    () => groupByDepartment(rows, unassigned, unassignedLabel, unknownDepartmentLabel),
+    [rows, unassigned, unassignedLabel, unknownDepartmentLabel]
+  );
+
+  const departmentChartData = useMemo(
+    () => aggregateByDepartment(rows, unknownDepartmentLabel),
+    [rows, unknownDepartmentLabel]
   );
 
   const plantXMax = useMemo(() => {
@@ -665,6 +1061,53 @@ const AssignedTicketStackedChart: React.FC<AssignedTicketStackedChartProps> = ({
     return name ? `${name} (${plant})` : plant;
   };
 
+  const plantChartData = useMemo(() => {
+    return plantGroups
+      .map((group) => {
+        const total = totalsSum(group.totals);
+        const code = group.plant === 'Unknown' ? unknownPlantLabel : group.plant;
+        const plantName = group.plant === 'Unknown' ? null : plantNames.get(group.plant);
+        return {
+          key: group.plant,
+          label: code.length > 14 ? `${code.slice(0, 12)}…` : code,
+          fullName: plantName ? `${plantName} (${code})` : code,
+          ...group.totals,
+          total,
+          target: total * TARGET_RATIO
+        };
+      })
+      .filter((row) => row.total > 0)
+      .sort((a, b) => b.total - a.total || a.label.localeCompare(b.label));
+  }, [plantGroups, unknownPlantLabel, plantNames]);
+
+  const departmentXMax = useMemo(() => {
+    let max = 0;
+    for (const section of departmentSections) {
+      for (const bar of section.bars) {
+        if (bar.total > max) max = bar.total;
+      }
+    }
+    return max;
+  }, [departmentSections]);
+
+  const openDepartmentBucket = (
+    bucket: Exclude<AssignedBucket, 'assigned'>,
+    assigneeIds: number[]
+  ) => {
+    if (bucket !== 'unassigned' && assigneeIds.length === 0) return;
+    const params = new URLSearchParams();
+    params.set('assignedBucket', bucket);
+    if (bucket === 'unassigned') {
+      params.set('startDate', startDate);
+      params.set('endDate', endDate);
+    } else {
+      params.set('dueStartDate', startDate);
+      params.set('dueEndDate', endDate);
+      params.set('assigned_to', assigneeIds.join(','));
+    }
+    window.open(`/tickets?${params.toString()}`, '_blank', 'noopener,noreferrer');
+  };
+
   const kpiTitle = t('dashboard.personalKPIComparison.ticketCountAssigned');
 
   if (loading) {
@@ -716,7 +1159,7 @@ const AssignedTicketStackedChart: React.FC<AssignedTicketStackedChartProps> = ({
             <BarChart3 className="h-5 w-5" />
             <span>{kpiTitle}</span>
           </div>
-          <div className="flex space-x-1 rounded-lg bg-muted p-1">
+          <div className="flex flex-wrap gap-1 rounded-lg bg-muted p-1">
             <Button
               type="button"
               variant={viewMode === 'all' ? 'default' : 'ghost'}
@@ -734,6 +1177,15 @@ const AssignedTicketStackedChart: React.FC<AssignedTicketStackedChartProps> = ({
               className={cn('flex-1 sm:flex-none')}
             >
               {t('dashboard.personalKPIComparison.byPlant')}
+            </Button>
+            <Button
+              type="button"
+              variant={viewMode === 'byDepartment' ? 'default' : 'ghost'}
+              size="sm"
+              onClick={() => setViewMode('byDepartment')}
+              className={cn('flex-1 sm:flex-none')}
+            >
+              {t('dashboard.personalKPIComparison.byDepartment')}
             </Button>
           </div>
         </CardTitle>
@@ -758,8 +1210,14 @@ const AssignedTicketStackedChart: React.FC<AssignedTicketStackedChartProps> = ({
               onRowClick={handleRowClick}
             />
           </div>
-        ) : (
+        ) : viewMode === 'byPlant' ? (
           <div className="space-y-6">
+            <GroupedTargetChart
+              data={plantChartData}
+              labels={labels}
+              title={t('dashboard.personalKPIComparison.byPlant')}
+              targetLabel={targetLabel}
+            />
             <StateLegend labels={labels} />
             {plantGroups.map((group) => (
               <div key={group.plant} className="space-y-3">
@@ -776,6 +1234,33 @@ const AssignedTicketStackedChart: React.FC<AssignedTicketStackedChartProps> = ({
                   bars={group.bars}
                   labels={labels}
                   xMax={plantXMax}
+                  onSegmentClick={handleSegmentClick}
+                  onRowClick={handleRowClick}
+                />
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="space-y-6">
+            <GroupedTargetChart
+              data={departmentChartData}
+              labels={labels}
+              title={t('dashboard.personalKPIComparison.byDepartment')}
+              targetLabel={targetLabel}
+            />
+            <StateLegend labels={labels} />
+            {departmentSections.map((section) => (
+              <div key={section.key} className="space-y-3">
+                <h3 className="text-base font-semibold text-foreground">{section.title}</h3>
+                <StateTiles
+                  totals={section.totals}
+                  labels={labels}
+                  onTileClick={(bucket) => openDepartmentBucket(bucket, section.assigneeIds)}
+                />
+                <SingleStackedChart
+                  bars={section.bars}
+                  labels={labels}
+                  xMax={departmentXMax}
                   onSegmentClick={handleSegmentClick}
                   onRowClick={handleRowClick}
                 />
