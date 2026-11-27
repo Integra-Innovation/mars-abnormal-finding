@@ -8,7 +8,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  OWNER: ${{ toLowerCase(github.repository_owner) }}
+  OWNER: ${{ github.repository_owner }}
 
 permissions:
   contents: read
@@ -21,6 +21,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Normalize owner to lowercase
+        run: echo "OWNER=$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -52,6 +55,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Normalize owner to lowercase
+        run: echo "OWNER=$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
